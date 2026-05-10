@@ -35,9 +35,10 @@ def _ensure_pkg() -> None:
     try:
         import googleapiclient  # noqa
         import google.auth      # noqa
+        import tqdm             # noqa
     except ImportError:
         subprocess.check_call([sys.executable, "-m", "pip", "install", "-q",
-                               "google-api-python-client", "google-auth"])
+                               "google-api-python-client", "google-auth", "tqdm"])
 
 
 def download(file_id: str, out_path: str | os.PathLike) -> None:
@@ -57,6 +58,7 @@ def download(file_id: str, out_path: str | os.PathLike) -> None:
     import google.auth
     from googleapiclient.discovery import build
     from googleapiclient.http import MediaIoBaseDownload
+    from tqdm.auto import tqdm
 
     try:
         creds, _ = google.auth.default()
@@ -70,18 +72,27 @@ def download(file_id: str, out_path: str | os.PathLike) -> None:
         )
 
     service = build("drive", "v3", credentials=creds, cache_discovery=False)
-    request = service.files().get_media(fileId=file_id)
 
-    print(f"[download] {file_id} -> {out}")
-    with open(out, "wb") as f:
+    # Pull file metadata so the progress bar has a known total.
+    meta = service.files().get(fileId=file_id, fields="size,name").execute()
+    total = int(meta.get("size") or 0) or None
+    name  = meta.get("name") or out.name
+
+    request = service.files().get_media(fileId=file_id)
+    with open(out, "wb") as f, tqdm(
+        total=total, unit="B", unit_scale=True, unit_divisor=1024,
+        desc=name, leave=True,
+    ) as bar:
         downloader = MediaIoBaseDownload(f, request, chunksize=64 * 1024 * 1024)
-        done = False
+        done, prev = False, 0
         while not done:
             status, done = downloader.next_chunk()
-            if status:
-                print(f"  {int(status.progress() * 100)}%  "
-                      f"({status.resumable_progress / 1e6:.1f} MB)")
-    print(f"[done] {out} ({out.stat().st_size / 1e6:.1f} MB)")
+            if status is not None:
+                cur = status.resumable_progress
+                bar.update(cur - prev)
+                prev = cur
+        if total and prev < total:
+            bar.update(total - prev)
 
 
 if __name__ == "__main__":
