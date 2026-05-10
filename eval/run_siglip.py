@@ -48,12 +48,16 @@ def build_brand_index(encoder, targetlist, cache_path):
         cached = np.load(cache_path, allow_pickle=True)
         return list(cached["brands"]), cached["protos"]
     brands, protos = [], []
+    n_skipped, first_err = 0, None
     for brand, paths in tqdm(targetlist.items(), desc="indexing brands"):
         vecs = []
         for p in paths:
             try:
                 vecs.append(encoder.encode(Image.open(p)))
-            except Exception:
+            except Exception as e:
+                n_skipped += 1
+                if first_err is None:
+                    first_err = (str(p), repr(e))
                 continue
         if not vecs:
             continue
@@ -61,6 +65,16 @@ def build_brand_index(encoder, targetlist, cache_path):
         proto = proto / (np.linalg.norm(proto) + 1e-12)
         brands.append(brand)
         protos.append(proto)
+    if not protos:
+        raise RuntimeError(
+            f"build_brand_index produced 0 brand prototypes "
+            f"(skipped {n_skipped} images). First error was on "
+            f"{first_err[0] if first_err else '<none>'}: "
+            f"{first_err[1] if first_err else '<none>'}"
+        )
+    if n_skipped:
+        print(f"[warn] indexed {len(brands)} brands; "
+              f"skipped {n_skipped} images. First skipped: {first_err}")
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     np.savez(cache_path, brands=np.array(brands), protos=np.stack(protos))
     return brands, np.stack(protos)
