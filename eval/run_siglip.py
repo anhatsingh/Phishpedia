@@ -23,7 +23,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from eval.common import (run_pipeline, load_logo_detector, detect_logo,
-                         load_targetlist, load_domain_map, domain_matches_brand)
+                         load_targetlist, load_domain_map, domain_matches_brand,
+                         normalize_brand)
 
 
 class SiglipEncoder:
@@ -52,9 +53,13 @@ def build_brand_index(encoder, targetlist, cache_path):
     if cache_path.exists():
         cached = np.load(cache_path, allow_pickle=True)
         return list(cached["brands"]), cached["protos"]
+    grouped: dict[str, list[Path]] = {}
+    for raw, paths in targetlist.items():
+        norm = normalize_brand(raw) or raw
+        grouped.setdefault(norm, []).extend(paths)
     brands, protos = [], []
     n_skipped, first_err = 0, None
-    for brand, paths in tqdm(targetlist.items(), desc="indexing brands"):
+    for brand, paths in tqdm(grouped.items(), desc="indexing brands"):
         vecs = []
         for p in paths:
             try:

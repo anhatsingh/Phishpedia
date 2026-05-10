@@ -59,6 +59,25 @@ def detect_logo(predictor, image_path: str):
     return boxes[top], crop_bgr[:, :, ::-1]       # RGB
 
 
+# -------------------------- Brand-name normalization --------------------------
+
+def normalize_brand(name: str | None) -> str | None:
+    """
+    Apply Phishpedia's brand_converter so that target-list folder names,
+    domain_map keys, and dataset gt_brand labels live in a single namespace.
+    Phishpedia normalises 'Adobe Inc.' -> 'Adobe', 'Google Inc.' -> 'Google',
+    etc. Without this, every CLIP/SigLIP match fails the domain check
+    (domain_map lookup misses) and the identification metric undercounts.
+    """
+    if not name:
+        return None
+    try:
+        from utils import brand_converter   # provided by upstream Phishpedia
+        return brand_converter(name)
+    except Exception:
+        return name
+
+
 # -------------------------- Target list & domain map --------------------------
 
 def load_targetlist(targetlist_dir: str) -> dict[str, list[Path]]:
@@ -153,7 +172,11 @@ def summarise(preds: list[dict], variant: str) -> dict:
 
     n_phish_total   = len(phish)
     n_phish_flagged = int(phish.pred_phish.sum())
-    n_brand_correct = int((phish.pred_phish & (phish.pred_brand == phish.gt_brand)).sum())
+    # Compare normalised brand names so 'Adobe Inc.' (gt) matches 'Adobe' (pred).
+    norm_gt   = phish.gt_brand.map(normalize_brand)
+    norm_pred = phish.pred_brand.map(normalize_brand)
+    n_brand_correct = int((phish.pred_phish & (norm_pred == norm_gt) &
+                           norm_gt.notna()).sum())
     n_benign_total  = len(benign)
     n_fp            = int(benign.pred_phish.sum())
 
