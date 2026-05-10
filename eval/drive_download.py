@@ -112,14 +112,16 @@ def _download_chunk(session, url: str, start: int, end: int, out: Path,
 
 
 def _download_parallel(creds, file_id: str, out: Path, total: int, name: str,
-                       n_workers: int, chunk_mb: int) -> None:
+                       n_workers: int, chunk_mb: int,
+                       position: int | None = None) -> None:
     from google.auth.transport.requests import AuthorizedSession
     from tqdm.auto import tqdm
 
     chunk = chunk_mb * 1024 * 1024
     ranges = [(s, min(s + chunk - 1, total - 1)) for s in range(0, total, chunk)]
-    print(f"[parallel] {name}  total={total/1e9:.2f} GB  "
-          f"{len(ranges)} chunks of {chunk_mb} MB  workers={n_workers}")
+    if position in (None, 0):
+        print(f"[parallel] {name}  total={total/1e9:.2f} GB  "
+              f"{len(ranges)} chunks of {chunk_mb} MB  workers={n_workers}")
 
     # Pre-allocate the output file so seek+write hits a real offset.
     with open(out, "wb") as f:
@@ -130,7 +132,8 @@ def _download_parallel(creds, file_id: str, out: Path, total: int, name: str,
     lock = threading.Lock()
 
     with tqdm(total=total, unit="B", unit_scale=True, unit_divisor=1024,
-              desc=name, leave=True) as bar:
+              desc=name, leave=True, position=position,
+              dynamic_ncols=True) as bar:
         with ThreadPoolExecutor(max_workers=n_workers) as ex:
             futures = [ex.submit(_download_chunk, session, url, s, e, out,
                                  bar, lock) for (s, e) in ranges]
@@ -145,7 +148,7 @@ def _download_parallel(creds, file_id: str, out: Path, total: int, name: str,
 # -------------------------- sequential fallback --------------------------
 
 def _download_sequential(creds, file_id: str, out: Path, total: int,
-                         name: str) -> None:
+                         name: str, position: int | None = None) -> None:
     """Original MediaIoBaseDownload path, kept as fallback."""
     from googleapiclient.discovery import build
     from googleapiclient.http import MediaIoBaseDownload
@@ -153,10 +156,11 @@ def _download_sequential(creds, file_id: str, out: Path, total: int,
 
     service = build("drive", "v3", credentials=creds, cache_discovery=False)
     request = service.files().get_media(fileId=file_id)
-    print(f"[sequential] {name}  total={total/1e9:.2f} GB")
+    if position in (None, 0):
+        print(f"[sequential] {name}  total={total/1e9:.2f} GB")
     with open(out, "wb") as f, tqdm(
         total=total or None, unit="B", unit_scale=True, unit_divisor=1024,
-        desc=name, leave=True,
+        desc=name, leave=True, position=position, dynamic_ncols=True,
     ) as bar:
         downloader = MediaIoBaseDownload(f, request, chunksize=64 * 1024 * 1024)
         done, prev = False, 0
@@ -174,7 +178,7 @@ def _download_sequential(creds, file_id: str, out: Path, total: int,
 
 def download(file_id: str, out_path: str | os.PathLike,
              n_workers: int = 8, chunk_mb: int = 32,
-             parallel: bool = True) -> None:
+             parallel: bool = True, _position: int | None = None) -> None:
     """
     Download a Drive file via the authenticated Drive API.
 
@@ -187,6 +191,8 @@ def download(file_id: str, out_path: str | os.PathLike,
         n_workers : parallel HTTP range workers (default 8).
         chunk_mb  : size of each range request in MB (default 32).
         parallel  : if False, use the slow single-stream path.
+        _position : tqdm row to render the bar on. download_many sets this
+                    so concurrent jobs don't overwrite each other's bars.
     """
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -204,7 +210,7 @@ def download(file_id: str, out_path: str | os.PathLike,
     if use_parallel:
         try:
             _download_parallel(creds, file_id, out, total, name,
-                               n_workers, chunk_mb)
+                               n_workers, chunk_mb, position=_position)
             print(f"[done] {out} ({out.stat().st_size / 1e6:.1f} MB)")
             return
         except Exception as e:
@@ -216,7 +222,7 @@ def download(file_id: str, out_path: str | os.PathLike,
             except FileNotFoundError:
                 pass
 
-    _download_sequential(creds, file_id, out, total, name)
+    _download_sequential(creds, file_id, out, total, name, position=_position)
     print(f"[done] {out} ({out.stat().st_size / 1e6:.1f} MB)")
 
 
@@ -248,15 +254,21 @@ def download_many(jobs: list[tuple[str, str | os.PathLike]],
           f"{n_workers_per_file} workers each "
           f"(~{len(jobs) * n_workers_per_file} concurrent connections)")
 
-    # Single ThreadPoolExecutor with one outer thread per file. Each call
-    # to download() spins up its own inner pool of n_workers_per_file.
+    # Reserve one tqdm row per concurrent job so bars don't clobber each
+    # other. tqdm.auto picks the notebook backend in Colab and renders one
+    # widget per position.
+    _ensure_pkg()
+    from tqdm.auto import tqdm
+    tqdm.set_lock(threading.RLock())
+
     errors: list[tuple[str, BaseException]] = []
     with ThreadPoolExecutor(max_workers=len(jobs)) as ex:
         futs = {
             ex.submit(download, fid, out,
                       n_workers=n_workers_per_file,
-                      chunk_mb=chunk_mb, parallel=parallel): (fid, out)
-            for fid, out in jobs
+                      chunk_mb=chunk_mb, parallel=parallel,
+                      _position=i): (fid, out)
+            for i, (fid, out) in enumerate(jobs)
         }
         for f in as_completed(futs):
             fid, out = futs[f]
@@ -265,6 +277,9 @@ def download_many(jobs: list[tuple[str, str | os.PathLike]],
             except BaseException as e:
                 errors.append((str(out), e))
                 print(f"[error] {out}: {type(e).__name__}: {e}")
+
+    # Drop the cursor below the bars so any later prints don't overwrite.
+    print("\n" * len(jobs), end="")
     if errors:
         raise RuntimeError(f"{len(errors)} download(s) failed: "
                            + ", ".join(p for p, _ in errors))
