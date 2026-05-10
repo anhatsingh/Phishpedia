@@ -19,12 +19,19 @@ USAGE - paste these as one Colab cell:
     auth.authenticate_user()
 
     import sys; sys.path.insert(0, '/content/Phishpedia/eval')
+    from drive_download import download_many
+    download_many([
+        ('12ypEMPRQ43zGRqHGut0Esq2z5en0DH4g', 'data/_raw/phish.zip'),
+        ('1yORUeSrF5vGcgxYrsCoqXcpOUHt-iHq_', 'data/_raw/benign.zip'),
+    ])
+
+Single-file form is also available:
     from drive_download import download
-    download('12ypEMPRQ43zGRqHGut0Esq2z5en0DH4g', 'data/_raw/phish.zip')
-    download('1yORUeSrF5vGcgxYrsCoqXcpOUHt-iHq_', 'data/_raw/benign.zip')
+    download('<file_id>', '<out_path>')
 
 Tuning knobs (rarely needed):
     download(file_id, out_path, n_workers=8, chunk_mb=32)
+    download_many(jobs, n_workers_per_file=4, chunk_mb=32)
 """
 from __future__ import annotations
 
@@ -211,6 +218,56 @@ def download(file_id: str, out_path: str | os.PathLike,
 
     _download_sequential(creds, file_id, out, total, name)
     print(f"[done] {out} ({out.stat().st_size / 1e6:.1f} MB)")
+
+
+def download_many(jobs: list[tuple[str, str | os.PathLike]],
+                  n_workers_per_file: int | None = None,
+                  chunk_mb: int = 32, parallel: bool = True) -> None:
+    """
+    Download multiple Drive files concurrently.
+
+    Args:
+        jobs               : list of (file_id, out_path) tuples.
+        n_workers_per_file : range workers per file. Defaults to
+                             max(2, 8 // len(jobs)) so total concurrent
+                             connections stay around 8 - matching the
+                             single-file default.
+        chunk_mb, parallel : forwarded to download() for each job.
+
+    Example:
+        download_many([
+            ('12ypEMPRQ43zGRqHGut0Esq2z5en0DH4g', 'data/_raw/phish.zip'),
+            ('1yORUeSrF5vGcgxYrsCoqXcpOUHt-iHq_', 'data/_raw/benign.zip'),
+        ])
+    """
+    if not jobs:
+        return
+    if n_workers_per_file is None:
+        n_workers_per_file = max(2, 8 // len(jobs))
+    print(f"[download_many] {len(jobs)} files, "
+          f"{n_workers_per_file} workers each "
+          f"(~{len(jobs) * n_workers_per_file} concurrent connections)")
+
+    # Single ThreadPoolExecutor with one outer thread per file. Each call
+    # to download() spins up its own inner pool of n_workers_per_file.
+    errors: list[tuple[str, BaseException]] = []
+    with ThreadPoolExecutor(max_workers=len(jobs)) as ex:
+        futs = {
+            ex.submit(download, fid, out,
+                      n_workers=n_workers_per_file,
+                      chunk_mb=chunk_mb, parallel=parallel): (fid, out)
+            for fid, out in jobs
+        }
+        for f in as_completed(futs):
+            fid, out = futs[f]
+            try:
+                f.result()
+            except BaseException as e:
+                errors.append((str(out), e))
+                print(f"[error] {out}: {type(e).__name__}: {e}")
+    if errors:
+        raise RuntimeError(f"{len(errors)} download(s) failed: "
+                           + ", ".join(p for p, _ in errors))
 
 
 if __name__ == "__main__":
