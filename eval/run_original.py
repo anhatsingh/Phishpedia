@@ -23,7 +23,16 @@ def main() -> None:
     args = ap.parse_args()
 
     from phishpedia import PhishpediaWrapper
+    import numpy as np
     pp = PhishpediaWrapper()
+
+    # Upstream bug: cache_reference_list() returns Python lists on cold start,
+    # but chunked_dot() does logo_feat_list.shape[0]. Coerce to ndarray so the
+    # first run after fresh setup works (subsequent runs hit the .npy cache).
+    if not hasattr(pp.LOGO_FEATS, "shape"):
+        pp.LOGO_FEATS = np.asarray(pp.LOGO_FEATS)
+    if not hasattr(pp.LOGO_FILES, "shape"):
+        pp.LOGO_FILES = np.asarray(pp.LOGO_FILES)
 
     def predict(row: dict) -> dict:
         screenshot = str(Path(row["folder"]) / "shot.png")
