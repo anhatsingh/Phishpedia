@@ -40,7 +40,7 @@ DOWNLOAD QUOTA WORKAROUND (the public Drive files often hit "Too many users"):
         python eval/prepare_data.py --phish_id <ID> --benign_id <ID>
 ------------------------------------------------------------------------------
 """
-import argparse, json, random, sys, zipfile
+import argparse, ast, json, random, sys, zipfile
 from collections import defaultdict
 from pathlib import Path, PurePosixPath
 
@@ -145,11 +145,53 @@ def extract_folders(zip_path: Path, sampled: dict[str, list[zipfile.ZipInfo]],
 
 
 def parse_info(info_txt: Path) -> dict:
-    lines = info_txt.read_text(errors="ignore").strip().splitlines()
+    """
+    Two formats seen in the wild:
+      (a) Plain text: line 1 = URL, line 2 = brand.
+      (b) Python dict literal: {'url': ..., 'brand': ..., ...}
+          (the official Phishpedia 30K dataset uses this).
+    """
+    text = info_txt.read_text(errors="ignore").strip()
+
+    # Try (b) first: a dict literal.
+    if text.startswith("{") and text.endswith("}"):
+        try:
+            d = ast.literal_eval(text)
+        except (ValueError, SyntaxError):
+            d = None
+        if isinstance(d, dict):
+            out: dict = {}
+            url = d.get("url") or d.get("URL") or ""
+            if isinstance(url, str) and url.strip():
+                out["url"] = url.strip()
+            brand = d.get("brand") or d.get("target") or ""
+            if isinstance(brand, str) and brand.strip():
+                out["brand"] = brand.strip()
+            if out.get("url"):
+                return out
+
+    # Fall back to (a): plain text.
+    lines = text.splitlines()
     out = {"url": lines[0].strip() if lines else ""}
     if len(lines) >= 2 and lines[1].strip():
         out["brand"] = lines[1].strip()
     return out
+
+
+def _build_rows_from_disk(data_dir: Path) -> list[dict]:
+    """Walk data/{phish,benign}/ and rebuild sample.json without re-extracting."""
+    rows = []
+    for label in ("phish", "benign"):
+        sub = data_dir / label
+        if not sub.is_dir():
+            continue
+        for folder in sorted(p for p in sub.iterdir() if p.is_dir()):
+            info = folder / "info.txt"
+            if not info.exists():
+                continue
+            rows.append({"folder": str(folder), "label": label,
+                         **parse_info(info)})
+    return rows
 
 
 def main() -> None:
@@ -167,9 +209,26 @@ def main() -> None:
     ap.add_argument("--benign_zip", help="Path to a locally-uploaded benign zip")
     ap.add_argument("--delete_zips_after", action="store_true",
                     help="Remove the large source zips once sampling is done")
+    ap.add_argument("--regen_only", action="store_true",
+                    help="Skip download/extract; just regenerate sample.json by "
+                         "walking the existing data/{phish,benign}/ folders.")
     args = ap.parse_args()
 
     data_dir = Path(args.data_dir)
+    if args.regen_only:
+        rows = _build_rows_from_disk(data_dir)
+        if not rows:
+            sys.exit("[error] --regen_only: no folders under data/phish or "
+                     "data/benign. Did you run a sampling pass first?")
+        out_json = data_dir / "sample.json"
+        out_json.write_text(json.dumps(rows, indent=2))
+        n_phish      = sum(r["label"] == "phish"  for r in rows)
+        n_benign     = sum(r["label"] == "benign" for r in rows)
+        n_with_brand = sum(bool(r.get("brand")) for r in rows if r["label"] == "phish")
+        print(f"[regen] wrote {out_json}: {n_phish} phish + {n_benign} benign")
+        print(f"        phish rows with brand label: {n_with_brand}/{n_phish}")
+        return
+
     raw_dir  = data_dir / "_raw"
     phish_default = PHISH_5BRAND_ID if args.use_5brand else PHISH_30K_ID
 
