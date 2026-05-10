@@ -41,7 +41,12 @@ class ClipEncoder:
         if isinstance(img, np.ndarray):
             img = Image.fromarray(img)
         inputs = self.proc(images=img.convert("RGB"), return_tensors="pt").to(self.device)
-        feats = self.model.get_image_features(**inputs)
+        # Bypass get_image_features: in some transformers versions it returns a
+        # BaseModelOutputWithPooling instead of a tensor. Call vision_model +
+        # visual_projection directly, matching get_image_features' contract.
+        vision_out = self.model.vision_model(pixel_values=inputs["pixel_values"])
+        pooled = vision_out.pooler_output
+        feats = self.model.visual_projection(pooled)
         feats = feats / feats.norm(dim=-1, keepdim=True)
         return feats.cpu().numpy()[0]
 

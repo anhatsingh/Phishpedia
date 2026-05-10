@@ -38,7 +38,12 @@ class SiglipEncoder:
         if isinstance(img, np.ndarray):
             img = Image.fromarray(img)
         inputs = self.proc(images=img.convert("RGB"), return_tensors="pt").to(self.device)
+        # Defensive: get_image_features returns BaseModelOutputWithPooling in
+        # some transformers versions instead of a tensor.
         feats = self.model.get_image_features(**inputs)
+        if not isinstance(feats, torch.Tensor):
+            feats = (feats.pooler_output if hasattr(feats, "pooler_output")
+                     else feats.last_hidden_state[:, 0])
         feats = feats / feats.norm(dim=-1, keepdim=True)
         return feats.cpu().numpy()[0]
 
